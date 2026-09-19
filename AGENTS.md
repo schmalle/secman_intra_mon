@@ -25,10 +25,17 @@ parent repo, nothing in the parent build touches this directory.
   operator is authorized to assess. Keep the authorization warning in the README.
 - The scope guard in `src/secman_intra_mon/scope.py` (private ranges by default,
   `--allow-public` opt-in, `--exclude` denylist) is a safety feature: do not weaken it,
-  and route every scan target and every enqueued network through it.
+  and route every scan target and every enqueued network through it. This includes
+  LLM-proposed actions in agentic mode (`agent.py`): the model proposes structured
+  actions from a closed vocabulary, the validator re-checks each one against the
+  guard, depth and budgets — the LLM must never construct argv or reach subprocess.
 - Credentials come from the **environment only** (`SECMAN_USERNAME`/`SECMAN_PASSWORD` or
-  `SECMAN_TOKEN`, DB via `SECMAN_INTRA_MON_DB_*`). Never accept credentials via CLI
-  arguments, never log them, never write them into scan output or the database.
+  `SECMAN_TOKEN`, DB via `SECMAN_INTRA_MON_DB_*`, LLM via `OPENROUTER_API_KEY` /
+  `SECMAN_INTRA_MON_LLM_*`). Never accept credentials via CLI arguments, never log
+  them, never write them into scan output or the database.
+- LLM requests export scan data to the configured endpoint: keep the redaction
+  default in `enrich.py` (asset IPs pseudonymized) and the data-egress section in
+  `docs/SAFETY.md` accurate when touching the LLM modules.
 - Scanner XML is parsed from stdout of self-invoked nmap/masscan processes; keep XML
   parsing DTD-free (`xml.etree.ElementTree` defaults, no external entities).
 - subprocess calls: argument lists only, `shell=False`, timeouts mandatory.
@@ -45,8 +52,9 @@ re-grep the extension for `/api/` usage.
 ## Layout
 
 ```
-src/secman_intra_mon/   package (cli, config, netinfo, scope, discovery, storage,
-                        output, secman, models, scanners/, migrations/)
+src/secman_intra_mon/   package (cli, config, netinfo, scope, discovery, agent,
+                        llm, report, enrich, ask, storage, output, secman,
+                        models, scanners/, migrations/)
 scripts/                setup.sh, verify.sh
 docs/                   ARCHITECTURE, SCANNERS, DOCKER, SECMAN, SAFETY
 Dockerfile              Linux runtime (scanner binaries included)

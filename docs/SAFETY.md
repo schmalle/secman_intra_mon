@@ -89,6 +89,40 @@ them accordingly:
 - The secman backend receives the same information via `--upload-secman`;
   confirm its access control and retention before pushing.
 
+## LLM features and data egress
+
+The optional LLM features (`report`, `enrich`, `ask`, `discover --agentic`)
+send scan-derived data — topology, IPs, hostnames, MAC vendors, open ports,
+service versions — to the configured LLM endpoint (OpenRouter by default).
+**That is an export of your internal network map to a third party.** Before
+setting `OPENROUTER_API_KEY`:
+
+- Get organizational approval, exactly as you would for the scan itself.
+  Check the endpoint provider's data-retention and training-use policies.
+- Prefer `SECMAN_INTRA_MON_LLM_BASE_URL` pointing at a self-hosted
+  OpenAI-compatible gateway when scan data must not leave your perimeter.
+- `enrich` pseudonymizes asset IPs by default (the model sees `h000`, `h001`,
+  mapped back locally); hostnames, MAC vendors and service detail are still
+  sent. `--no-redact` disables pseudonymization. The agentic planner and
+  `report`/`ask` need real addresses and values to be useful — no redaction
+  there.
+- The API key comes from the environment only and is sent nowhere but the
+  configured endpoint (HTTPS enforced, plain HTTP only for localhost); it is
+  never logged, persisted, or included in scan output.
+- Model output is advisory: classifications, findings and narratives are
+  hints for an analyst, not verified facts. Findings recorded in the database
+  carry the model name for provenance.
+
+**Agentic mode boundaries.** The planner never constructs shell commands and
+never touches subprocess: it proposes one structured action per step
+(`scan_network`, `trace_host`, `note`, `stop`), and every proposal passes the
+same scope guard as the deterministic engine, plus `--max-depth` and the hard
+`--agent-max-actions` / `--agent-max-networks` budgets — the model can narrow
+the plan, never widen it. Packet-sending actions require operator
+confirmation unless `--yes` is given; every proposal, verdict and rejection
+is written to the run's audit log (`scan_runs.params_json`). Treat `--yes`
+like any other unattended-scan setting: use it only in an agreed scan window.
+
 ## Responsible defaults summary
 
 | Aspect | Default | Override |
@@ -106,3 +140,7 @@ them accordingly:
 | Credentials | environment only, never CLI/output/DB | — |
 | Persistence | off unless DB is configured | `--store-db` |
 | secman upload | off | `--upload-secman` / `secman-push` |
+| LLM features | off (no API key configured) | `OPENROUTER_API_KEY` |
+| Enrichment redaction | asset IPs pseudonymized per batch | `--no-redact` |
+| Agentic approvals | operator confirms each action | `--yes` |
+| Agentic budgets | 30 actions / 10 networks, plus `--max-depth` | `--agent-max-actions` / `--agent-max-networks` |

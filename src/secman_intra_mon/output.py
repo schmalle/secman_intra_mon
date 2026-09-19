@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.table import Table
 
 from .discovery import DiscoveryPlanEntry, DiscoveryRun
@@ -250,3 +251,133 @@ def _ip_sort_key(host: DiscoveredHost) -> tuple[int, ...]:
         return tuple(int(part) for part in host.ip.split("."))
     except ValueError:
         return (0,)
+
+
+# -- LLM features (report / enrich / ask / agentic) -----------------------------
+
+
+def print_narrative(markdown_text: str) -> None:
+    console.print(Markdown(markdown_text))
+
+
+def print_run_overview(run: dict[str, Any], networks: list[str], asset_count: int) -> None:
+    console.print(f"[bold cyan]Run {run['id']}[/bold cyan] {run['command']}")
+    console.print(f"  started  : {run['started_at']}")
+    console.print(f"  finished : {run['finished_at'] or 'running'}")
+    console.print(f"  networks : {', '.join(networks) if networks else '—'}")
+    console.print(f"  assets   : {asset_count}")
+
+
+def print_diff_report(diff: dict[str, list[dict[str, Any]]], from_run: int, to_run: int) -> None:
+    console.print(f"[bold]Changes between run {from_run} and run {to_run}[/bold]")
+    for key, title in (
+        ("appeared_assets", "Appeared assets"),
+        ("disappeared_assets", "Disappeared assets"),
+    ):
+        rows = diff[key]
+        console.print(f"\n[bold]{title} ({len(rows)})[/bold]")
+        if rows:
+            console.print(_asset_rows_table(rows))
+    for key, title in (
+        ("appeared_ports", "Newly open ports"),
+        ("disappeared_ports", "No-longer-seen ports"),
+    ):
+        rows = diff[key]
+        console.print(f"\n[bold]{title} ({len(rows)})[/bold]")
+        if rows:
+            console.print(_port_rows_table(rows))
+
+
+def _asset_rows_table(assets: list[dict[str, Any]]) -> Table:
+    table = Table(show_lines=False)
+    table.add_column("IP")
+    table.add_column("Hostname", overflow="fold")
+    table.add_column("MAC / Vendor", overflow="fold")
+    table.add_column("Open ports", overflow="fold")
+    for asset in assets:
+        mac = asset["mac"] or ""
+        if asset["mac_vendor"]:
+            mac = f"{mac} ({asset['mac_vendor']})" if mac else asset["mac_vendor"]
+        open_ports = [p for p in asset["ports"] if p["state"] == "open"]
+        ports = ", ".join(f"{p['port']}/{p['service'] or '?'}" for p in open_ports) or "—"
+        table.add_row(asset["ip"], asset["hostname"] or "—", mac or "—", ports)
+    return table
+
+
+def _port_rows_table(rows: list[dict[str, Any]]) -> Table:
+    table = Table(show_lines=False)
+    table.add_column("IP")
+    table.add_column("Port", justify="right")
+    table.add_column("Proto")
+    table.add_column("Service", overflow="fold")
+    table.add_column("Runs", justify="right")
+    for row in rows:
+        service = row["service"] or "unknown"
+        detail = " ".join(p for p in (row["product"], row["version"]) if p)
+        table.add_row(
+            row["ip"],
+            str(row["port"]),
+            row["protocol"],
+            f"{service} ({detail})" if detail else service,
+            f"{row['first_seen_run_id']}→{row['last_seen_run_id']}",
+        )
+    return table
+
+
+def print_enrichments(rows: list[dict[str, Any]]) -> None:
+    table = Table(title=f"Asset classification ({len(rows)})")
+    table.add_column("IP")
+    table.add_column("Device type")
+    table.add_column("Role", overflow="fold")
+    table.add_column("Criticality")
+    table.add_column("Conf.", justify="right")
+    table.add_column("Rationale", overflow="fold")
+    for row in rows:
+        table.add_row(
+            row["ip"],
+            row["device_type"] or "—",
+            row["role"] or "—",
+            _severity_styled(row["criticality"]) if row["criticality"] else "—",
+            f"{row['confidence']:.2f}",
+            row["rationale"] or "—",
+        )
+    console.print(table)
+
+
+def print_findings(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        console.print("[dim]no findings recorded[/dim]")
+        return
+    table = Table(title=f"Findings ({len(rows)})")
+    table.add_column("IP")
+    table.add_column("Severity")
+    table.add_column("Title", overflow="fold")
+    table.add_column("Detail", overflow="fold")
+    for row in rows:
+        table.add_row(
+            row["ip"],
+            _severity_styled(row["severity"]),
+            row["title"],
+            row["detail"] or "—",
+        )
+    console.print(table)
+
+
+def _severity_styled(severity: str) -> str:
+    style = {"high": "red", "medium": "yellow", "low": "blue"}.get(severity, "dim")
+    return f"[{style}]{severity}[/{style}]"
+
+
+def print_rows(rows: list[dict[str, Any]], title: str = "Result", max_rows: int = 100) -> None:
+    if not rows:
+        console.print("[dim]no rows[/dim]")
+        return
+    columns = [str(key) for key in rows[0]]
+    table = Table(title=f"{title} ({len(rows)} row(s))")
+    for column in columns:
+        table.add_column(column, overflow="fold")
+    for row in rows[:max_rows]:
+        table.add_row(*("" if row.get(key) is None else str(row.get(key)) for key in row))
+    console.print(table)
+    if len(rows) > max_rows:
+        info(f"showing first {max_rows} of {len(rows)} rows — narrow the question or use --json")

@@ -44,6 +44,26 @@ class DiscoveredHost:
 
 
 @dataclass
+class Enrichment:
+    """LLM classification of one asset (persisted in asset_enrichment)."""
+
+    device_type: str = ""
+    role: str = ""
+    criticality: str = ""  # low | medium | high
+    confidence: float = 0.0
+    rationale: str = ""
+
+
+@dataclass
+class Finding:
+    """One LLM-recorded exposure observation on an asset."""
+
+    severity: str  # info | low | medium | high
+    title: str
+    detail: str = ""
+
+
+@dataclass
 class NetworkSeed:
     cidr: str
     discovered_via: str  # "manual" | "interface" | "route" | "traceroute"

@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 
 from .config import SecmanConfig
-from .models import DiscoveredHost
+from .models import DiscoveredHost, Enrichment
 
 USER_AGENT = "secman-intra-mon/0.1"
 LOGIN_PATH = "/api/auth/login"
@@ -93,16 +93,19 @@ class SecmanClient:
 
     # -- ingestion -----------------------------------------------------------
 
-    def push_asset(self, host: DiscoveredHost, owner: str) -> bool:
+    def push_asset(self, host: DiscoveredHost, owner: str, enrichment: Enrichment | None = None) -> bool:
         """Idempotent upsert of one asset. Returns True when newly created."""
+        description = f"Discovered by secman_intra_mon ({host.discovered_via or 'scan'})"
+        if enrichment and enrichment.role:
+            description += f" — {enrichment.role}"
         body: dict[str, Any] = {
             "name": host.display_name(),
             "type": "Network Host",
             "owner": owner,
             "ip": host.ip,
             "networkZone": "INTERNAL",
-            "description": f"Discovered by secman_intra_mon ({host.discovered_via or 'scan'})",
-            "tags": self._asset_tags(host),
+            "description": description,
+            "tags": self._asset_tags(host, enrichment),
         }
         response = self._request("PUT", IMPORT_ASSET_PATH, json=body)
         payload = response.json()
@@ -136,7 +139,7 @@ class SecmanClient:
         return response
 
     @staticmethod
-    def _asset_tags(host: DiscoveredHost) -> dict[str, str]:
+    def _asset_tags(host: DiscoveredHost, enrichment: Enrichment | None = None) -> dict[str, str]:
         tags: dict[str, str] = {"discovered_via": host.discovered_via or "scan"}
         if host.mac:
             tags["mac"] = host.mac
@@ -148,6 +151,11 @@ class SecmanClient:
             tags["open_ports"] = ",".join(
                 f"{p.port}/{p.protocol}" for p in sorted(host.open_ports, key=lambda p: p.port)
             )
+        if enrichment:
+            if enrichment.device_type:
+                tags["device_type"] = enrichment.device_type
+            if enrichment.criticality:
+                tags["criticality"] = enrichment.criticality
         return tags
 
 
@@ -156,13 +164,14 @@ def push_hosts(
     hosts: list[DiscoveredHost],
     owner: str,
     xml_documents: list[str] | None = None,
+    enrichments: dict[str, Enrichment] | None = None,
 ) -> PushSummary:
     """Push all discovered assets, then upload nmap XML. Never raises on
     individual asset failures — errors are collected into the summary."""
     summary = PushSummary()
     for host in hosts:
         try:
-            if client.push_asset(host, owner):
+            if client.push_asset(host, owner, (enrichments or {}).get(host.ip)):
                 summary.assets_created += 1
             else:
                 summary.assets_updated += 1

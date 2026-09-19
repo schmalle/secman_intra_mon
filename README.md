@@ -97,15 +97,19 @@ uv run secman-intra-mon assets show 192.168.1.23
 
 | Command | Purpose | Key options |
 | --- | --- | --- |
-| `discover` | Iterative BFS discovery, seeded from this host's networks | `--network/-n` (repeatable), `--max-depth` (default 2), `--profile fast\|default\|full\|masscan`, `--os-scan`, `--exclude` (repeatable), `--allow-public`, `--allow-large`, `--no-expand`, `--no-dns`, `--dry-run`, `--store-db`, `--upload-secman`, `--masscan-rate` (default 1000), `--json` |
+| `discover` | Iterative BFS discovery, seeded from this host's networks | `--network/-n` (repeatable), `--max-depth` (default 2), `--profile fast\|default\|full\|masscan`, `--os-scan`, `--exclude` (repeatable), `--allow-public`, `--allow-large`, `--no-expand`, `--no-dns`, `--dry-run`, `--store-db`, `--upload-secman`, `--masscan-rate` (default 1000), `--agentic` (+`--yes`, `--agent-max-actions`, `--agent-max-networks`), `--enrich` (+`--no-redact`), `--json` |
 | `scan` | Direct nmap service scan of the given targets | targets (IPs, CIDRs, hostnames), `--profile fast\|default\|full`, `--ports/-p`, `--os-scan`, `--exclude`, `--allow-public`, `--allow-large`, `--store-db`, `--json` |
-| `capabilities` | Show detected scanner tools and privilege level | — |
+| `capabilities` | Show detected scanner tools, privileges and LLM status | — |
 | `db init` | Create the database (if needed) and apply migrations | — |
 | `assets list` | List persisted assets | `--network/-n`, `--run-id`, `--json` |
 | `assets show <ip>` | Show one persisted asset with its ports | `--json` |
 | `networks list` | List discovered networks | `--json` |
 | `runs` | List past scan runs | `--limit` (default 20), `--json` |
-| `secman-push` | Push the persisted assets of a run to secman | `--run-id` (default: latest run) |
+| `secman-push` | Push the persisted assets of a run to secman | `--run-id` (default: latest run), `--enrich`, `--no-redact` |
+| `report` | Summarize a run, or diff two runs (LLM narrative when configured) | `--run-id`, `--from`/`--to`, `--json` |
+| `enrich` | LLM-classify persisted assets, record exposure findings | `--run-id`, `--no-redact`, `--json` |
+| `findings list` | List recorded exposure findings | `--severity`, `--json` |
+| `ask` | Answer a question with one read-only SQL query over the scan DB | `--json` |
 
 Every command supports `--help`; the app supports `--version`.
 
@@ -141,6 +145,11 @@ set -a; . ./.env; set +a
 | `SECMAN_USERNAME` / `SECMAN_PASSWORD` | — | secman login (dedicated ADMIN-role service account) |
 | `SECMAN_TOKEN` | — | existing secman JWT, alternative to username/password |
 | `SECMAN_ASSET_OWNER` | `SECMAN_USERNAME` | owner written onto imported secman assets |
+| `OPENROUTER_API_KEY` | — | OpenRouter key; enables the LLM features when set |
+| `SECMAN_INTRA_MON_LLM_MODEL` | `openai/gpt-4o-mini` | model for reports, classification and NL2SQL |
+| `SECMAN_INTRA_MON_LLM_PLANNER_MODEL` | `SECMAN_INTRA_MON_LLM_MODEL` | model for the agentic discovery planner |
+| `SECMAN_INTRA_MON_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible endpoint (self-hosted allowed; HTTPS required outside localhost) |
+| `SECMAN_INTRA_MON_LLM_TIMEOUT` | `60` | LLM request timeout in seconds |
 
 Values may be `pass://` references (for example
 `pass://secman/intra-mon-db-password`) resolved through your secret-manager
@@ -192,6 +201,46 @@ Host` assets (upsert by name) and submits the raw nmap XML so secman builds
 port-level records. See [secman integration](docs/SECMAN.md) for details and
 troubleshooting.
 
+## Optional LLM features (OpenRouter)
+
+With `OPENROUTER_API_KEY` set, four AI features become available on top of the
+deterministic pipeline — all of them additive, all of them off without a key:
+
+```bash
+uv run secman-intra-mon report --run-id 3          # narrative summary of a run
+uv run secman-intra-mon report --from 2 --to 3     # what changed between runs?
+uv run secman-intra-mon enrich --run-id 3          # classify assets, record findings
+uv run secman-intra-mon findings list --severity high
+uv run secman-intra-mon ask "which hosts appeared in the last run with SMB open?"
+sudo -E uv run secman-intra-mon discover --agentic   # the LLM plans the iteration
+```
+
+- **`report`** turns run data or a run-to-run diff into an analyst-style
+  narrative. Without an LLM key it prints the raw tables instead.
+- **`enrich`** classifies assets (device type, role, criticality) and records
+  exposure findings (legacy protocols, broad port exposure, ...) into the
+  `asset_enrichment` and `findings` tables (run `db init` to apply migration
+  002). Classifications flow into secman as `device_type`/`criticality` tags
+  on the next `secman-push` (or immediately via `secman-push --enrich` /
+  `discover --enrich`). IPs are pseudonymized before they leave the host
+  (`--no-redact` disables that).
+- **`ask`** translates a question into a single read-only SELECT (validated,
+  LIMIT-capped, executed in a transaction that is always rolled back).
+- **`discover --agentic`** replaces the fixed BFS with an observe → plan →
+  act loop: the planner proposes one action per step from a closed vocabulary
+  (`scan_network`, `trace_host`, `note`, `stop`). Every proposal is validated
+  against the same scope guard, depth limits and hard budgets
+  (`--agent-max-actions`, `--agent-max-networks`) — the model can narrow the
+  plan, never widen it, and it never constructs commands. Each packet-sending
+  action needs operator confirmation unless `--yes` is given, and every
+  proposal and verdict is written to an audit log persisted in the run's
+  `params_json`.
+
+Data egress: LLM requests carry scan results (topology, hosts, services) to
+the configured endpoint. Read [docs/SAFETY.md](docs/SAFETY.md) before
+enabling, and consider `SECMAN_INTRA_MON_LLM_BASE_URL` pointing at a
+self-hosted OpenAI-compatible gateway to keep the data on-prem.
+
 ## Development
 
 Python 3.12+, managed with uv. Lint/typecheck/build gate before every commit:
@@ -207,6 +256,11 @@ directly) and follow Conventional Commits — see `AGENTS.md`.
 src/secman_intra_mon/
   cli.py            commands (typer)
   discovery.py      iterative BFS engine
+  agent.py          agentic planner loop (discover --agentic)
+  llm.py            OpenRouter / OpenAI-compatible client (httpx)
+  report.py         run summaries and diffs (LLM narratives)
+  enrich.py         LLM asset classification + findings
+  ask.py            natural-language to read-only SQL
   netinfo.py        local interfaces/routes (ip -j, psutil fallback)
   scope.py          scope guard — the safety boundary
   scanners/         nmap, masscan, fping, arp-scan, traceroute adapters
@@ -250,3 +304,9 @@ docker-compose.yml  scanner app + MariaDB 11.4
 - secman upload requires an ADMIN-role account and pushes assets plus raw nmap
   XML only; port-level records exist in secman only for runs uploaded while the
   XML was still in memory (`discover --upload-secman`).
+- LLM features need network access to the configured endpoint and send it scan
+  data (pseudonymized for `enrich`, real addresses for the agentic planner).
+  Classification and findings are model output: treat them as hints for an
+  analyst, not as verified facts. The agentic planner is additionally bounded
+  by the scope guard, depth and the action/network budgets — but its plan
+  quality depends entirely on the configured model.

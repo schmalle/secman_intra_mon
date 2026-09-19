@@ -90,6 +90,8 @@ Applied by `db init` from `migrations/001_initial.sql`; a
 | `networks` | every network ever processed | `cidr` UNIQUE, `discovered_via`, `depth`, `first_seen_run_id`, `last_seen_run_id` |
 | `assets` | one row per discovered IP | `ip` UNIQUE, `mac`, `mac_vendor`, `hostname`, `os_guess`, `discovered_via`, `network_cidr`, `first_seen_run_id`, `last_seen_run_id` |
 | `ports` | one row per open/filtered port per asset | UNIQUE (`asset_id`, `port`, `protocol`), `state`, `service`, `product`, `version`, `first_seen_run_id`, `last_seen_run_id`; FK to `assets` with `ON DELETE CASCADE` |
+| `asset_enrichment` (002) | latest LLM classification per asset | `asset_id` PK/FK, `device_type`, `asset_role`, `criticality`, `confidence`, `rationale`, `model` |
+| `findings` (002) | LLM-recorded exposure findings per asset | `asset_id` FK, `severity`, `title`, `detail`, `model`; replaced wholesale per classification |
 
 **Upsert and idempotency semantics.** Writes are `INSERT ... ON DUPLICATE KEY
 UPDATE` against the natural keys (`assets.ip`, `ports(asset_id, port,
@@ -116,6 +118,36 @@ nmap is the only hard requirement: every profile ends in an `nmap -sV` service
 scan, and nmap is also the final host-discovery fallback. Everything else
 degrades gracefully — see [SCANNERS.md](SCANNERS.md) for privileges and
 detection.
+
+## Optional LLM layer
+
+`llm.py` is a thin OpenAI-compatible chat client (OpenRouter by default, any
+endpoint via `SECMAN_INTRA_MON_LLM_BASE_URL`; `httpx`, no SDK). Everything
+behind it is additive and disabled without `OPENROUTER_API_KEY`:
+
+- `report.py` — run summaries and run-to-run diffs. Diff semantics follow the
+  observation interval `[first_seen_run_id, last_seen_run_id]`: appeared =
+  first observed in `(from, to]`; disappeared = still observed at `from`, no
+  longer observed at `to`. The deterministic payload always exists; the LLM
+  only narrates it.
+- `enrich.py` — batched asset classification (device type, role, criticality)
+  plus exposure findings, persisted into migration 002 tables and pushed to
+  secman as `device_type`/`criticality` tags. IPs are pseudonymized per batch
+  unless `--no-redact`. Model output is validated and clamped before use.
+- `ask.py` — NL-to-SQL over the scan schema: one statement, SELECT/WITH only,
+  write keywords rejected, LIMIT enforced, executed in a read-only
+  transaction that is always rolled back.
+- `agent.py` — the agentic planner (`discover --agentic`). An observe → plan
+  → act loop: the model receives a compact state rendering and proposes ONE
+  action per step from a closed vocabulary (`scan_network`, `trace_host`,
+  `note`, `stop`). Validation is the hard boundary: CIDR/IP parsing, the
+  scope guard, depth via `--max-depth`, profile/tool availability, and the
+  `--agent-max-actions` / `--agent-max-networks` budgets. The model never
+  builds commands; packet-sending actions need operator approval unless
+  `--yes`; every proposal and verdict is appended to an audit log persisted
+  in `scan_runs.params_json`. Execution reuses the discovery engine
+  (`_process_network` with a per-action profile, `_candidates_from_hops` for
+  trace expansion), so guard behavior is identical to the deterministic mode.
 
 ## Security design
 

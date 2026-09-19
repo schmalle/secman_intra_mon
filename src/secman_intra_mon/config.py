@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 DB_ENV_PREFIX = "SECMAN_INTRA_MON_DB_"
+LLM_ENV_PREFIX = "SECMAN_INTRA_MON_LLM_"
+DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_LLM_MODEL = "openai/gpt-4o-mini"
 
 
 class ConfigError(Exception):
@@ -72,19 +75,71 @@ class SecmanConfig:
         return cls(base_url=base_url, token=token, username=username, password=password)
 
 
-def validate_base_url(raw: str) -> str:
+@dataclass
+class LlmConfig:
+    """Connection settings for the optional LLM features (OpenRouter or any
+    OpenAI-compatible endpoint). Absent an API key, all LLM features are off."""
+
+    api_key: str
+    model: str
+    planner_model: str
+    base_url: str
+    timeout: float
+
+    @classmethod
+    def from_env(cls) -> LlmConfig | None:
+        """Return the LLM config, or None when OPENROUTER_API_KEY is not set."""
+        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if not api_key:
+            return None
+        model = os.environ.get(LLM_ENV_PREFIX + "MODEL", "").strip() or DEFAULT_LLM_MODEL
+        planner_model = os.environ.get(LLM_ENV_PREFIX + "PLANNER_MODEL", "").strip() or model
+        raw_base_url = os.environ.get(LLM_ENV_PREFIX + "BASE_URL", "").strip() or DEFAULT_LLM_BASE_URL
+        base_url = validate_llm_base_url(raw_base_url)
+        try:
+            timeout = float(os.environ.get(LLM_ENV_PREFIX + "TIMEOUT", "60"))
+        except ValueError as exc:
+            raise ConfigError(f"{LLM_ENV_PREFIX}TIMEOUT is not a number") from exc
+        if timeout <= 0:
+            raise ConfigError(f"{LLM_ENV_PREFIX}TIMEOUT must be positive")
+        return cls(
+            api_key=api_key,
+            model=model,
+            planner_model=planner_model,
+            base_url=base_url,
+            timeout=timeout,
+        )
+
+
+def validate_base_url(raw: str, env_var: str = "SECMAN_URL") -> str:
     """HTTPS-only origin; plain HTTP is tolerated for localhost development."""
     parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ConfigError(f"SECMAN_URL must be an http(s) origin, got: {raw!r}")
+        raise ConfigError(f"{env_var} must be an http(s) origin, got: {raw!r}")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ConfigError("SECMAN_URL must not contain credentials, query or fragment")
+        raise ConfigError(f"{env_var} must not contain credentials, query or fragment")
     if parsed.scheme == "http" and not _is_localhost(parsed.hostname):
-        raise ConfigError("SECMAN_URL must use https; plain http is only allowed for localhost targets")
+        raise ConfigError(f"{env_var} must use https; plain http is only allowed for localhost targets")
     origin = f"{parsed.scheme}://{parsed.hostname}"
     if parsed.port:
         origin += f":{parsed.port}"
     return origin.rstrip("/")
+
+
+def validate_llm_base_url(raw: str) -> str:
+    """Like validate_base_url, but keeps the path (API prefix such as /api/v1)."""
+    env_var = LLM_ENV_PREFIX + "BASE_URL"
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ConfigError(f"{env_var} must be an http(s) origin, got: {raw!r}")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ConfigError(f"{env_var} must not contain credentials, query or fragment")
+    if parsed.scheme == "http" and not _is_localhost(parsed.hostname):
+        raise ConfigError(f"{env_var} must use https; plain http is only allowed for localhost targets")
+    base = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        base += f":{parsed.port}"
+    return (base + parsed.path).rstrip("/")
 
 
 def _is_localhost(hostname: str) -> bool:

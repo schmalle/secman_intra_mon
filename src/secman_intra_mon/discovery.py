@@ -157,7 +157,13 @@ def _seed_networks(options: DiscoveryOptions, topology: LocalTopology) -> list[N
     return seeds
 
 
-def _process_network(network: IpNetwork, seed: NetworkSeed, run: DiscoveryRun) -> NetworkResult:
+def _process_network(
+    network: IpNetwork,
+    seed: NetworkSeed,
+    run: DiscoveryRun,
+    profile: str | None = None,
+) -> NetworkResult:
+    profile = profile or run.options.profile
     result = NetworkResult(seed=seed)
 
     hosts, tool = _discover_hosts(network, run)
@@ -171,10 +177,10 @@ def _process_network(network: IpNetwork, seed: NetworkSeed, run: DiscoveryRun) -
     if run.options.resolve_dns:
         _enrich_dns(hosts)
 
-    if run.options.profile == "masscan":
+    if profile == "masscan":
         _scan_services_masscan(network, result, run)
     elif hosts:
-        _scan_services_nmap(hosts, run)
+        _scan_services_nmap(hosts, run, profile)
 
     return result
 
@@ -209,11 +215,13 @@ def _discover_hosts(network: IpNetwork, run: DiscoveryRun) -> tuple[list[Discove
     return hosts, tool
 
 
-def _scan_services_nmap(hosts: list[DiscoveredHost], run: DiscoveryRun) -> None:
+def _scan_services_nmap(hosts: list[DiscoveredHost], run: DiscoveryRun, profile: str | None = None) -> None:
     """Classic profile: nmap -sV over the live hosts, merged in place."""
     base.require_tool(run.tools, "nmap")
     ips = [h.ip for h in hosts]
-    scanned, xml_doc = nmap.service_scan(ips, profile=run.options.profile, os_scan=run.options.os_scan)
+    scanned, xml_doc = nmap.service_scan(
+        ips, profile=profile or run.options.profile, os_scan=run.options.os_scan
+    )
     run.nmap_xml_documents.append(xml_doc)
     scanned_by_ip = {h.ip: h for h in scanned}
     for host in hosts:
@@ -284,23 +292,40 @@ def _expand(result: NetworkResult, run: DiscoveryRun) -> list[NetworkSeed]:
     sample = _trace_sample(result.live_hosts, run.topology)
     candidates: dict[str, NetworkSeed] = {}
     for ip in sample:
-        for hop in traceroute.trace_hops(ip):
-            hop_addr = ipaddress.ip_address(hop)
-            if not run.guard.ip_allowed(hop_addr) or hop_addr.is_loopback:
-                continue
-            if hop_addr in network:
-                continue
-            candidate = ipaddress.ip_network(f"{hop}/24", strict=False)
-            allowed, _reason = run.guard.assess(candidate)
-            if not allowed:
-                continue
-            key = str(candidate)
-            if key not in run.visited and key not in candidates:
-                candidates[key] = NetworkSeed(
-                    cidr=key,
-                    discovered_via=f"traceroute via {hop}",
-                    depth=result.seed.depth + 1,
-                )
+        for seed in _candidates_from_hops(
+            traceroute.trace_hops(ip), network, result.seed.depth + 1, run.guard, run.visited
+        ):
+            candidates.setdefault(seed.cidr, seed)
+    return list(candidates.values())
+
+
+def _candidates_from_hops(
+    hops: list[str],
+    network: IpNetwork,
+    depth: int,
+    guard: ScopeGuard,
+    visited: set[str],
+) -> list[NetworkSeed]:
+    """Turn traceroute hops into candidate seeds: every hop outside the
+    current network is a router interface; its /24 becomes a candidate."""
+    candidates: dict[str, NetworkSeed] = {}
+    for hop in hops:
+        hop_addr = ipaddress.ip_address(hop)
+        if not guard.ip_allowed(hop_addr) or hop_addr.is_loopback:
+            continue
+        if hop_addr in network:
+            continue
+        candidate = ipaddress.ip_network(f"{hop}/24", strict=False)
+        allowed, _reason = guard.assess(candidate)
+        if not allowed:
+            continue
+        key = str(candidate)
+        if key not in visited and key not in candidates:
+            candidates[key] = NetworkSeed(
+                cidr=key,
+                discovered_via=f"traceroute via {hop}",
+                depth=depth,
+            )
     return list(candidates.values())
 
 

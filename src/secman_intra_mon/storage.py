@@ -18,7 +18,7 @@ import pymysql
 import pymysql.cursors
 
 from .config import DbConfig
-from .models import DiscoveredHost, DiscoveredPort, NetworkSeed
+from .models import DiscoveredHost, DiscoveredPort, Enrichment, Finding, NetworkSeed
 from .scanners.base import ToolStatus
 
 MIGRATIONS_PACKAGE = "secman_intra_mon.migrations"
@@ -273,6 +273,193 @@ class Storage:
             cur.execute("SELECT MAX(id) AS max_id FROM scan_runs")
             row = cur.fetchone()
             return int(row["max_id"]) if row and row["max_id"] is not None else None
+
+    def get_run(self, run_id: int) -> dict[str, Any] | None:
+        with self._connection().cursor() as cur:
+            cur.execute(
+                "SELECT id, started_at, finished_at, command, params_json FROM scan_runs WHERE id = %s",
+                (run_id,),
+            )
+            row: dict[str, Any] | None = cur.fetchone()
+            return row
+
+    def append_run_params(self, run_id: int, extra: dict[str, Any]) -> None:
+        """Merge keys into the run's params_json (e.g. the agentic audit log)."""
+        with self._connection().cursor() as cur:
+            cur.execute("SELECT params_json FROM scan_runs WHERE id = %s", (run_id,))
+            row = cur.fetchone()
+            params: dict[str, Any] = {}
+            if row and row["params_json"]:
+                try:
+                    loaded = json.loads(row["params_json"])
+                    if isinstance(loaded, dict):
+                        params = loaded
+                except json.JSONDecodeError:
+                    params = {}
+            params.update(extra)
+            cur.execute(
+                "UPDATE scan_runs SET params_json = %s WHERE id = %s",
+                (json.dumps(params), run_id),
+            )
+        self._connection().commit()
+
+    # -- run diffs (report command) -------------------------------------------
+
+    def diff_assets(self, from_run: int, to_run: int) -> dict[str, list[dict[str, Any]]]:
+        """Asset/port changes between two runs.
+
+        A row's observation interval is [first_seen_run_id, last_seen_run_id].
+        Appeared = first observed after from_run, at latest in to_run;
+        disappeared = still observed at from_run, no longer observed in to_run.
+        """
+        asset_sql = (
+            "SELECT a.id, a.ip, a.mac, a.mac_vendor, a.hostname, a.os_guess,"
+            " a.discovered_via, a.network_cidr, a.first_seen_run_id,"
+            " a.last_seen_run_id, p.port, p.protocol, p.state, p.service,"
+            " p.product, p.version"
+            " FROM assets a LEFT JOIN ports p ON p.asset_id = a.id"
+        )
+        port_sql = (
+            "SELECT a.ip, p.port, p.protocol, p.state, p.service, p.product, p.version,"
+            " p.first_seen_run_id, p.last_seen_run_id"
+            " FROM ports p JOIN assets a ON a.id = p.asset_id"
+        )
+        with self._connection().cursor() as cur:
+            cur.execute(
+                f"{asset_sql} WHERE a.first_seen_run_id > %s AND a.first_seen_run_id <= %s"
+                " ORDER BY LENGTH(a.ip), a.ip, p.port",
+                (from_run, to_run),
+            )
+            appeared_assets = _group_assets(cur.fetchall())
+            cur.execute(
+                f"{asset_sql} WHERE a.first_seen_run_id <= %s"
+                " AND a.last_seen_run_id >= %s AND a.last_seen_run_id < %s"
+                " ORDER BY LENGTH(a.ip), a.ip, p.port",
+                (from_run, from_run, to_run),
+            )
+            disappeared_assets = _group_assets(cur.fetchall())
+            cur.execute(
+                f"{port_sql} WHERE p.first_seen_run_id > %s AND p.first_seen_run_id <= %s"
+                " ORDER BY LENGTH(a.ip), a.ip, p.port",
+                (from_run, to_run),
+            )
+            appeared_ports = list(cur.fetchall())
+            cur.execute(
+                f"{port_sql} WHERE p.first_seen_run_id <= %s"
+                " AND p.last_seen_run_id >= %s AND p.last_seen_run_id < %s"
+                " ORDER BY LENGTH(a.ip), a.ip, p.port",
+                (from_run, from_run, to_run),
+            )
+            disappeared_ports = list(cur.fetchall())
+        return {
+            "appeared_assets": appeared_assets,
+            "disappeared_assets": disappeared_assets,
+            "appeared_ports": appeared_ports,
+            "disappeared_ports": disappeared_ports,
+        }
+
+    # -- LLM enrichment (enrich command, discover/secman-push --enrich) --------
+
+    def upsert_enrichment(self, ip: str, enrichment: Enrichment, model: str) -> None:
+        conn = self._connection()
+        with conn.cursor() as cur:
+            asset_id = self._asset_id_for(cur, ip)
+            cur.execute(
+                "INSERT INTO asset_enrichment"
+                " (asset_id, device_type, asset_role, criticality, confidence, rationale, model)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON DUPLICATE KEY UPDATE"
+                " device_type = VALUES(device_type),"
+                " asset_role = VALUES(asset_role),"
+                " criticality = VALUES(criticality),"
+                " confidence = VALUES(confidence),"
+                " rationale = VALUES(rationale),"
+                " model = VALUES(model),"
+                " classified_at = CURRENT_TIMESTAMP",
+                (
+                    asset_id,
+                    enrichment.device_type[:64],
+                    enrichment.role[:255],
+                    enrichment.criticality[:16],
+                    enrichment.confidence,
+                    enrichment.rationale,
+                    model[:128],
+                ),
+            )
+        conn.commit()
+
+    def replace_findings(self, ip: str, findings: list[Finding], model: str) -> None:
+        """Findings reflect the latest classification: replace per asset."""
+        conn = self._connection()
+        with conn.cursor() as cur:
+            asset_id = self._asset_id_for(cur, ip)
+            cur.execute("DELETE FROM findings WHERE asset_id = %s", (asset_id,))
+            for finding in findings:
+                cur.execute(
+                    "INSERT INTO findings (asset_id, severity, title, detail, model)"
+                    " VALUES (%s, %s, %s, %s, %s)",
+                    (asset_id, finding.severity[:16], finding.title[:255], finding.detail, model[:128]),
+                )
+        conn.commit()
+
+    def get_enrichments(self, run_id: int | None = None) -> dict[str, Enrichment]:
+        """Map asset ip -> stored enrichment, optionally limited to one run."""
+        sql = (
+            "SELECT a.ip, e.device_type, e.asset_role, e.criticality, e.confidence, e.rationale"
+            " FROM asset_enrichment e JOIN assets a ON a.id = e.asset_id"
+        )
+        params: tuple[Any, ...] = ()
+        if run_id is not None:
+            sql += " WHERE a.last_seen_run_id = %s"
+            params = (run_id,)
+        with self._connection().cursor() as cur:
+            cur.execute(sql, params)
+            return {
+                str(row["ip"]): Enrichment(
+                    device_type=row["device_type"],
+                    role=row["asset_role"],
+                    criticality=row["criticality"],
+                    confidence=float(row["confidence"]),
+                    rationale=row["rationale"] or "",
+                )
+                for row in cur.fetchall()
+            }
+
+    def list_findings(self, severity: str | None = None) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT a.ip, f.severity, f.title, f.detail, f.model, f.created_at"
+            " FROM findings f JOIN assets a ON a.id = f.asset_id"
+        )
+        params: tuple[Any, ...] = ()
+        if severity:
+            sql += " WHERE f.severity = %s"
+            params = (severity,)
+        sql += " ORDER BY FIELD(f.severity, 'high', 'medium', 'low', 'info'), LENGTH(a.ip), a.ip, f.title"
+        with self._connection().cursor() as cur:
+            cur.execute(sql, params)
+            return list(cur.fetchall())
+
+    # -- read-only queries (ask command) ----------------------------------------
+
+    def run_readonly_query(self, sql: str, max_rows: int = 200) -> list[dict[str, Any]]:
+        """Run one SELECT in a read-only transaction; always rolled back."""
+        conn = self._connection()
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION TRANSACTION READ ONLY")
+            try:
+                cur.execute(sql)
+                rows = list(cur.fetchall())[:max_rows]
+            finally:
+                conn.rollback()
+                cur.execute("SET SESSION TRANSACTION READ WRITE")
+        return rows
+
+    def _asset_id_for(self, cur: Any, ip: str) -> int:
+        cur.execute("SELECT id FROM assets WHERE ip = %s", (ip,))
+        row = cur.fetchone()
+        if row is None:
+            raise StorageError(f"no persisted asset with IP {ip}")
+        return int(row["id"])
 
 
 def _group_assets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
