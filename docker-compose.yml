@@ -1,0 +1,52 @@
+# Self-contained local setup: the scanner plus a dedicated MariaDB.
+#
+#   docker compose up -d db
+#   docker compose run --rm app db init
+#   docker compose run --rm app discover --store-db
+#   docker compose run --rm app assets list
+#
+# The app uses host networking so ARP discovery and masscan see the real LAN
+# (Linux only — on macOS/Windows host networking does not expose the LAN).
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: secman_intra_mon
+      MARIADB_USER: intra_mon
+      MARIADB_PASSWORD: ${SECMAN_INTRA_MON_DB_PASSWORD:-CHANGEME}
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  app:
+    build: .
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      SECMAN_INTRA_MON_DB_HOST: 127.0.0.1
+      SECMAN_INTRA_MON_DB_PORT: "3306"
+      SECMAN_INTRA_MON_DB_NAME: secman_intra_mon
+      SECMAN_INTRA_MON_DB_USER: intra_mon
+      SECMAN_INTRA_MON_DB_PASSWORD: ${SECMAN_INTRA_MON_DB_PASSWORD:-CHANGEME}
+      SECMAN_URL: ${SECMAN_URL:-}
+      SECMAN_USERNAME: ${SECMAN_USERNAME:-}
+      SECMAN_PASSWORD: ${SECMAN_PASSWORD:-}
+      SECMAN_TOKEN: ${SECMAN_TOKEN:-}
+      SECMAN_ASSET_OWNER: ${SECMAN_ASSET_OWNER:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:
