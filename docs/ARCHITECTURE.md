@@ -44,13 +44,13 @@ then processed in three phases:
 
 - **Host discovery** — pick the best available tool (details in
   [SCANNERS.md](SCANNERS.md)):
-  `arp-scan` when the network is directly connected (L2-adjacent) and we hold
-  `CAP_NET_RAW`, else `fping`, else `nmap -sn` (with `-PR` when L2-adjacent
-  and raw-capable). Discovered hosts are filtered through the guard's per-IP
+  union `arp-scan` (when L2-adjacent and raw-capable), `fping`, and `nmap -sn`
+  (`-PR` when L2-adjacent and raw-capable). Complementary results are merged;
+  failed optional methods do not erase successful observations. Discovered hosts are filtered through the guard's per-IP
   check, so an exclude list is honored even when a scanner reports extra
   addresses.
-- **Service scan** — classic profiles (`fast`/`default`/`full`) run one
-  `nmap -sV` over the live hosts; the raw `-oX` XML is kept in memory for the
+- **Service scan** — classic profiles (`fast`/`default`/`full`) run
+  `nmap -sV -Pn` over live hosts in batches of at most 256; the raw `-oX` XML is kept in memory for the
   optional secman upload. The `masscan` profile instead sweeps the whole
   network with masscan (default ports 1–10000, `--masscan-rate` pps), adds
   hosts that answered with open ports but never showed up in discovery, then
@@ -118,6 +118,21 @@ nmap is the only hard requirement: every profile ends in an `nmap -sV` service
 scan, and nmap is also the final host-discovery fallback. Everything else
 degrades gracefully — see [SCANNERS.md](SCANNERS.md) for privileges and
 detection.
+
+The host-discovery columns describe complementary inputs, not a first-success
+fallback: available methods are unioned to reduce false negatives.
+
+## Local asset classification
+
+`classification.py` deterministically maps scan evidence to
+`network_device`, `server`, `endpoint`, or `unknown`. Network control services
+and ports (for example SNMP, BGP, NETCONF) plus network-vendor/OS identity
+hints take precedence; common hosted services support a server classification;
+workstation/mobile hints support endpoint classification. Weak evidence remains
+unknown. This zero-egress result is displayed in CLI/JSON output and attached
+to secman imports as `asset_kind` with `classification_method=local-heuristic`.
+The optional LLM enrichment is separate and can add a more detailed device
+type, role, criticality, and rationale.
 
 ## Optional LLM layer
 
