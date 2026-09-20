@@ -21,10 +21,14 @@ The primary scanner, used in every run.
 - Host discovery fallback: `nmap -sn -n -T4 --max-retries 2 [-PR] -oX - <targets>`
   (`-PR` ARP ping when the network is L2-adjacent and we are raw-capable;
   reported as `nmap-pr`, otherwise `nmap-sn`).
-- Service scan: `nmap -sV --version-intensity 4 -n -T4 [ports] [-O]
+- Service scan: `nmap -sV --version-intensity 4 -n -T4 -Pn [ports] [-O]
   --host-timeout 300s -oX - <targets>` where ports come from the profile
   (`fast` = `--top-ports 100`, `default` = `--top-ports 1000`, `full` = `-p-`)
   or from `--ports/-p` on the `scan` command.
+- Live targets are split into batches of 256 to stay below operating-system
+  argument limits. `-Pn` is intentional: a target already seen by ARP, fping,
+  or nmap discovery must not disappear merely because it blocks nmap's second
+  discovery check.
 - The raw `-oX` XML is parsed with stdlib `xml.etree.ElementTree` (no DTDs or
   external entities) and retained in memory so `--upload-secman` can submit the
   genuine nmap output to the backend.
@@ -87,9 +91,14 @@ paths and profiles are actually usable.
 ## Fallback chains at a glance
 
 ```
-host discovery (L2-adjacent + CAP_NET_RAW):  arp-scan → fping → nmap -sn -PR
-host discovery (routed):                     fping → nmap -sn
+host discovery (L2-adjacent + CAP_NET_RAW):  union(arp-scan, fping, nmap -sn -PR)
+host discovery (routed):                     union(fping, nmap -sn)
 service scan:                                nmap -sV            (always)
 masscan profile:                             masscan → nmap -sV verification
 expansion:                                   traceroute → (none; skipped if absent)
 ```
+
+The union is deliberate: ICMP-only discovery misses filtered hosts, while
+nmap's mixed probes and layer-2 ARP find different populations. A failed
+optional method does not discard results from another method. IPv6 uses nmap;
+the packaged `arp-scan`, `fping`, and masscan paths are treated as IPv4-only.

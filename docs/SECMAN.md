@@ -62,7 +62,9 @@ After the discovery finishes, the push runs in three steps:
 2. **Asset import** — one `PUT /api/assets/import` per discovered host:
    `name` (hostname or IP), `type` = `Network Host`, `owner`, `ip`,
    `networkZone` = `INTERNAL`, a description noting the discovery method, and
-   tags: `discovered_via`, `mac`, `mac_vendor`, `os_guess`, and `open_ports`
+   tags: `source=secman-intra-mon`, `active_discovery=true`, `asset_kind`,
+   `classification_method=local-heuristic`, `discovered_via`, `mac`,
+   `mac_vendor`, `os_guess`, and `open_ports`
    (e.g. `22/tcp,443/tcp`). Secman upserts by name, so re-runs update the same
    asset instead of duplicating it; tags merge additively.
 3. **nmap XML upload** — each network's raw nmap `-oX` document (kept in memory
@@ -73,6 +75,15 @@ After the discovery finishes, the push runs in three steps:
 The push is **best-effort per asset**: a single failing host or XML document is
 collected into the summary and reported as a warning; it does not abort the
 remaining uploads.
+
+No discovery command uploads implicitly. The operator must spell
+`--upload-secman`, or later run the equally explicit `secman-push` command.
+The source/active-discovery tags make imported observations distinguishable
+from manually maintained assets. Classification is deterministic and local:
+network protocol ports/services and network-vendor/OS hints identify network
+devices; common hosted services identify servers; workstation/mobile OS hints
+identify endpoints; insufficient evidence remains `unknown`. Treat it as a
+triage hint, not an inventory authority.
 
 ### `secman-push` — re-pushing a persisted run
 

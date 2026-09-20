@@ -140,7 +140,14 @@ class SecmanClient:
 
     @staticmethod
     def _asset_tags(host: DiscoveredHost, enrichment: Enrichment | None = None) -> dict[str, str]:
-        tags: dict[str, str] = {"discovered_via": host.discovered_via or "scan"}
+        classification = host.asset_kind
+        tags: dict[str, str] = {
+            "source": "secman-intra-mon",
+            "active_discovery": "true",
+            "discovered_via": host.discovered_via or "scan",
+            "asset_kind": classification,
+            "classification_method": "local-heuristic",
+        }
         if host.mac:
             tags["mac"] = host.mac
         if host.mac_vendor:

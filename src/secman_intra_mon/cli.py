@@ -197,7 +197,11 @@ def discover(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print the plan, send no packets.")] = False,
     store_db: Annotated[bool, typer.Option("--store-db", help="Persist results into MariaDB.")] = False,
     upload_secman: Annotated[
-        bool, typer.Option("--upload-secman", help="Push results to the secman backend.")
+        bool,
+        typer.Option(
+            "--upload-secman",
+            help="Explicitly push and flag actively discovered assets in secman (off by default).",
+        ),
     ] = False,
     masscan_rate: Annotated[
         int, typer.Option("--masscan-rate", help="masscan packets/second (profile masscan).")
@@ -229,6 +233,14 @@ def discover(
         _fail(f"unknown profile {profile!r} (choose from {', '.join(PROFILES)})")
     if agentic and dry_run:
         _fail("--agentic cannot be combined with --dry-run")
+    if dry_run and (store_db or upload_secman or enrich):
+        _fail("--dry-run cannot be combined with --store-db, --upload-secman, or --enrich")
+    if max_depth < 0:
+        _fail("--max-depth must be zero or greater")
+    if masscan_rate <= 0:
+        _fail("--masscan-rate must be greater than zero")
+    if agent_max_actions <= 0 or agent_max_networks <= 0:
+        _fail("agent budgets must be greater than zero")
     if agentic and not yes and not sys.stdin.isatty():
         _fail("--agentic needs an interactive terminal for action approval, or pass --yes")
     guard = _guard(allow_public, exclude, allow_large)
@@ -440,6 +452,8 @@ def scan(
     """Direct nmap service scan of the given targets."""
     from .scanners import nmap as nmap_scanner
 
+    if profile not in ("fast", "default", "full"):
+        _fail("unknown scan profile (choose from fast, default, full)")
     guard = _guard(allow_public, exclude, allow_large)
     checked = [_checked_target(t, guard) for t in targets]
 
@@ -448,7 +462,7 @@ def scan(
         base.require_tool(tools, "nmap")
         hosts, _xml = nmap_scanner.service_scan(
             checked,
-            profile=profile if profile in PROFILES else "default",
+            profile=profile,
             ports=ports,
             os_scan=os_scan,
         )
@@ -491,7 +505,9 @@ def _checked_target(target: str, guard: ScopeGuard) -> str:
             _fail(f"invalid target (not an IP, CIDR or resolvable hostname): {target!r}")
         if not guard.ip_allowed(ipaddress.ip_address(resolved)):
             _fail(f"{target!r} resolves to {resolved} which is out of scope")
-        return target
+        # Pin the checked address. Passing the hostname onward would allow a
+        # later DNS answer (or another address in the RRset) to bypass scope.
+        return resolved
     allowed, reason = guard.assess(network)
     if not allowed:
         _fail(f"target {target!r} rejected by scope guard: {reason}")
@@ -508,7 +524,7 @@ def _network_label_for(ip: str) -> str:
 def _host_to_dict(host: DiscoveredHost) -> dict[str, Any]:
     from dataclasses import asdict
 
-    return asdict(host)
+    return {**asdict(host), "asset_kind": host.asset_kind}
 
 
 # -- capabilities ----------------------------------------------------------------

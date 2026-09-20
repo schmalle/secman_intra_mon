@@ -18,6 +18,7 @@ import ipaddress
 import socket
 from collections import deque
 from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from .models import DiscoveredHost, NetworkResult, NetworkSeed
@@ -29,6 +30,7 @@ from .scope import IpNetwork, ScopeGuard, parse_network
 TRACE_SAMPLE_SIZE = 8
 #: cap for reverse-DNS lookups per network
 DNS_LOOKUP_CAP = 64
+SERVICE_SCAN_BATCH_SIZE = 256
 
 
 @dataclass
@@ -186,46 +188,58 @@ def _process_network(
 
 
 def _discover_hosts(network: IpNetwork, run: DiscoveryRun) -> tuple[list[DiscoveredHost], str]:
-    """Pick the best available discovery tool for this network."""
+    """Union complementary discovery methods to reduce false negatives."""
     tools = run.tools
     l2_adjacent = run.topology.is_directly_connected(network)
     can_raw = base.has_net_raw()
+    found: dict[str, DiscoveredHost] = {}
+    methods: list[str] = []
+
+    def merge(hosts: list[DiscoveredHost], method: str) -> None:
+        if method not in methods:
+            methods.append(method)
+        for candidate in hosts:
+            existing = found.get(candidate.ip)
+            if existing is None:
+                candidate.discovered_via = candidate.discovered_via or method
+                found[candidate.ip] = candidate
+            else:
+                _merge_scan_detail(existing, candidate)
 
     arp_status = tools.get("arp-scan")
-    if l2_adjacent and can_raw and arp_status and arp_status.available:
+    if network.version == 4 and l2_adjacent and can_raw and arp_status and arp_status.available:
         interface = _interface_for(network, run.topology)
-        try:
-            return arpscan.arp_sweep(network, interface=interface), "arp-scan"
-        except base.ScannerError:
-            pass  # fall through to nmap -PR / fping
+        with suppress(base.ScannerError):
+            merge(arpscan.arp_sweep(network, interface=interface), "arp-scan")
 
     fping_status = tools.get("fping")
-    if fping_status and fping_status.available:
-        try:
-            return fping.ping_sweep(network), "fping"
-        except base.ScannerError:
-            pass
+    if network.version == 4 and fping_status and fping_status.available:
+        with suppress(base.ScannerError):
+            merge(fping.ping_sweep(network), "fping")
 
     base.require_tool(tools, "nmap")
-    use_arp = l2_adjacent and can_raw
-    hosts, _xml = nmap.host_discovery([str(network)], arp=use_arp)
-    tool = "nmap-pr" if use_arp else "nmap-sn"
-    for host in hosts:
-        host.discovered_via = tool
-    return hosts, tool
+    use_arp = network.version == 4 and l2_adjacent and can_raw
+    try:
+        hosts, _xml = nmap.host_discovery([str(network)], arp=use_arp)
+        merge(hosts, "nmap-pr" if use_arp else "nmap-sn")
+    except base.ScannerError:
+        if not found:
+            raise
+    return list(found.values()), "+".join(methods)
 
 
 def _scan_services_nmap(hosts: list[DiscoveredHost], run: DiscoveryRun, profile: str | None = None) -> None:
     """Classic profile: nmap -sV over the live hosts, merged in place."""
     base.require_tool(run.tools, "nmap")
-    ips = [h.ip for h in hosts]
-    scanned, xml_doc = nmap.service_scan(
-        ips, profile=profile or run.options.profile, os_scan=run.options.os_scan
-    )
-    run.nmap_xml_documents.append(xml_doc)
-    scanned_by_ip = {h.ip: h for h in scanned}
-    for host in hosts:
-        _merge_scan_detail(host, scanned_by_ip.get(host.ip))
+    for offset in range(0, len(hosts), SERVICE_SCAN_BATCH_SIZE):
+        batch = hosts[offset : offset + SERVICE_SCAN_BATCH_SIZE]
+        scanned, xml_doc = nmap.service_scan(
+            [h.ip for h in batch], profile=profile or run.options.profile, os_scan=run.options.os_scan
+        )
+        run.nmap_xml_documents.append(xml_doc)
+        scanned_by_ip = {h.ip: h for h in scanned}
+        for host in batch:
+            _merge_scan_detail(host, scanned_by_ip.get(host.ip))
 
 
 def _scan_services_masscan(network: IpNetwork, result: NetworkResult, run: DiscoveryRun) -> None:
