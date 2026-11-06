@@ -107,6 +107,7 @@ def hosts_table(hosts: list[DiscoveredHost]) -> Table:
     table.add_column("Hostname", overflow="fold")
     table.add_column("MAC / Vendor", overflow="fold")
     table.add_column("OS guess", overflow="fold")
+    table.add_column("Kind")
     table.add_column("Open ports", overflow="fold")
     for host in sorted(hosts, key=_ip_sort_key):
         mac = host.mac or ""
@@ -118,6 +119,7 @@ def hosts_table(hosts: list[DiscoveredHost]) -> Table:
             host.hostname or "—",
             mac or "—",
             host.os_guess or "—",
+            host.asset_kind.replace("_", " "),
             ports,
         )
     return table
@@ -126,11 +128,17 @@ def hosts_table(hosts: list[DiscoveredHost]) -> Table:
 def print_run_summary(run: DiscoveryRun) -> None:
     hosts = run.all_hosts
     open_ports = sum(len(h.open_ports) for h in hosts)
+    kinds = {kind: sum(h.asset_kind == kind for h in hosts) for kind in {h.asset_kind for h in hosts}}
     errored = [r for r in run.results if r.error]
     console.print("\n[bold]Discovery summary[/bold]")
     console.print(f"  networks visited : {len(run.visited)}")
     console.print(f"  live hosts       : {len(hosts)}")
     console.print(f"  open ports       : {open_ports}")
+    if kinds:
+        console.print(
+            "  asset kinds      : "
+            + ", ".join(f"{kind.replace('_', ' ')}={count}" for kind, count in sorted(kinds.items()))
+        )
     if errored:
         console.print(f"  networks skipped : {len(errored)} (out of scope or failed)")
 
@@ -144,7 +152,7 @@ def run_to_dict(run: DiscoveryRun) -> dict[str, Any]:
                 "discovered_via": r.seed.discovered_via,
                 "discovery_tool": r.discovery_tool,
                 "error": r.error,
-                "hosts": [asdict(h) for h in r.live_hosts],
+                "hosts": [{**asdict(h), "asset_kind": h.asset_kind} for h in r.live_hosts],
             }
             for r in run.results
         ],
@@ -152,6 +160,10 @@ def run_to_dict(run: DiscoveryRun) -> dict[str, Any]:
             "networks_visited": len(run.visited),
             "live_hosts": len(run.all_hosts),
             "open_ports": sum(len(h.open_ports) for h in run.all_hosts),
+            "asset_kinds": {
+                kind: sum(h.asset_kind == kind for h in run.all_hosts)
+                for kind in sorted({h.asset_kind for h in run.all_hosts})
+            },
         },
     }
 
@@ -165,6 +177,7 @@ def print_assets(assets: list[dict[str, Any]]) -> None:
     table.add_column("Hostname", overflow="fold")
     table.add_column("MAC / Vendor", overflow="fold")
     table.add_column("OS guess", overflow="fold")
+    table.add_column("Kind")
     table.add_column("Network")
     table.add_column("Open ports", overflow="fold")
     table.add_column("Last run", justify="right")
@@ -179,6 +192,7 @@ def print_assets(assets: list[dict[str, Any]]) -> None:
             asset["hostname"] or "—",
             mac or "—",
             asset["os_guess"] or "—",
+            _host_from_asset(asset).asset_kind.replace("_", " "),
             asset["network_cidr"] or "—",
             ports,
             str(asset["last_seen_run_id"]),
@@ -251,6 +265,19 @@ def _ip_sort_key(host: DiscoveredHost) -> tuple[int, ...]:
         return tuple(int(part) for part in host.ip.split("."))
     except ValueError:
         return (0,)
+
+
+def _host_from_asset(asset: dict[str, Any]) -> DiscoveredHost:
+    """Build the observation subset needed by the local classifier."""
+    from .models import DiscoveredPort
+
+    return DiscoveredHost(
+        ip=str(asset["ip"]),
+        mac_vendor=asset.get("mac_vendor"),
+        hostname=asset.get("hostname"),
+        os_guess=asset.get("os_guess"),
+        ports=[DiscoveredPort(**port) for port in asset.get("ports", [])],
+    )
 
 
 # -- LLM features (report / enrich / ask / agentic) -----------------------------

@@ -42,6 +42,13 @@ class DiscoveredHost:
     def display_name(self) -> str:
         return self.hostname or self.ip
 
+    @property
+    def asset_kind(self) -> str:
+        """Best-effort local classification; never requires data egress."""
+        from .classification import classify_host
+
+        return classify_host(self).kind
+
 
 @dataclass
 class Enrichment:

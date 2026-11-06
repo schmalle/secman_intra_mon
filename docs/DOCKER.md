@@ -18,15 +18,19 @@ docker build -t secman-intra-mon .
 ### Full layer-2 mode (recommended, Linux only)
 
 ```bash
-docker run --rm --network host --cap-add NET_RAW --cap-add NET_ADMIN \
+docker run --rm --network host --user root --cap-drop ALL \
+  --cap-add NET_RAW --cap-add NET_ADMIN \
   secman-intra-mon capabilities
 
-docker run --rm --network host --cap-add NET_RAW --cap-add NET_ADMIN \
+docker run --rm --network host --user root --cap-drop ALL \
+  --cap-add NET_RAW --cap-add NET_ADMIN \
   secman-intra-mon discover --dry-run
 ```
 
-Host networking puts the container on the real LAN, and the added capabilities
-allow raw-packet work. Everything works in this mode: interface/route seeding
+Host networking puts the container on the real LAN. The explicit root user is
+needed because several packaged scanner binaries check their effective UID in
+addition to opening raw sockets; `--cap-drop ALL` and the two added capabilities
+constrain it to networking operations. Everything works in this mode: interface/route seeding
 sees the host's topology, ARP discovery runs on connected segments, masscan and
 `--os-scan` are usable, and traceroute expansion observes real paths.
 
@@ -86,7 +90,8 @@ The compose `app` service passes the standard variables through from your
 shell; for plain `docker run`, pass them with `-e` or `--env-file`:
 
 ```bash
-docker run --rm --network host --cap-add NET_RAW --cap-add NET_ADMIN \
+docker run --rm --network host --user root --cap-drop ALL \
+  --cap-add NET_RAW --cap-add NET_ADMIN \
   --env-file .env \
   secman-intra-mon discover --store-db --upload-secman
 ```
@@ -101,11 +106,13 @@ docker run --rm --network host --cap-add NET_RAW --cap-add NET_ADMIN \
 Remember that `.env` contains secrets — keep it out of images and git (the
 repo's `.dockerignore`/`.gitignore` already exclude it).
 
-## Non-root container user
+## Container privilege model
 
-The image creates and runs as `intramon` (uid 10001) and never needs root
-*inside* the container. Raw-packet capability is granted at run time from
-outside — `--cap-add NET_RAW --cap-add NET_ADMIN` on `docker run`, or the
-`cap_add` section in compose — following least privilege: an unprivileged
-process by default, with exactly the capabilities scanning requires added back,
-and only when you actually want ARP/masscan/OS-detection fidelity.
+The image defaults to `intramon` (uid 10001), which is suitable for `--help`,
+capability inspection, direct TCP service scans, and degraded discovery.
+Full ARP/masscan/OS fidelity requires the explicit root invocation shown above:
+Debian's scanner executables may reject a non-root euid even if Docker grants
+raw-socket capabilities. Compose makes that choice explicitly and drops every
+capability except `NET_RAW` and `NET_ADMIN`. This is still a privileged network
+position: do not add `--privileged`, do not mount the Docker socket, and use a
+dedicated scanning host where possible.

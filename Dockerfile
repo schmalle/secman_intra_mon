@@ -34,8 +34,9 @@ RUN uv sync --locked --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Runs unprivileged by default; grant NET_RAW/NET_ADMIN at `docker run` time
-# when raw-packet scanning is wanted (setpriv keeps file caps of nmap etc.).
+# Runs unprivileged by default. Some scanner binaries also enforce euid 0, so
+# full-fidelity runs explicitly select root while dropping all unrelated caps
+# (see docs/DOCKER.md); targeted TCP scans need no privilege.
 RUN useradd --system --uid 10001 --create-home intramon \
     && chown -R intramon /app
 USER intramon

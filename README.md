@@ -12,6 +12,11 @@ history, and can optionally be pushed to a secman backend (idempotent asset
 upserts plus raw nmap XML uploads). A Dockerfile provides a Linux runtime with
 all scanner tools included.
 
+The tool distinguishes `network_device`, `server`, `endpoint`, and `unknown`
+locally from observed services, ports, OS guesses, and MAC-vendor hints. This
+classification is evidence-based but heuristic; ambiguous hosts remain
+`unknown` rather than being guessed.
+
 > **AUTHORIZATION WARNING** — scan only networks you own or have explicit
 > written permission to assess. This is an *active* scanner: it sends ARP,
 > ICMP, TCP, and UDP probes. Unauthorized scanning may be illegal in your
@@ -45,6 +50,32 @@ networks come from the host's interfaces and routing table. `sudo -E` preserves
 your environment; elevated privileges are only needed for ARP discovery, OS
 detection (`--os-scan`), and the `masscan` profile — plain nmap-based discovery
 runs unprivileged.
+
+### Preconditions for a useful intranet map
+
+Before claiming coverage, verify all of the following:
+
+1. Written authorization covers every seed, routed segment, scan window, and
+   probe type. Agree exclusions with the network owner first.
+2. The scanner is attached to each required security zone, or has routes and
+   firewall policy permitting probes and replies. Traceroute can reveal paths;
+   it cannot cross an ACL or invent a route.
+3. `nmap` is installed. For highest IPv4 layer-2 coverage, also install
+   `arp-scan` and `fping` and run with raw-packet privileges. Use masscan only
+   when its additional load has been approved.
+4. Run `capabilities`, then `discover --dry-run`, and confirm that the shown
+   interfaces/routes match the intended vantage point. Container bridge mode
+   sees the container network, not the physical LAN.
+5. DNS visibility, host firewalls, NAC, VLAN segmentation, sleeping devices,
+   IPv6 policy, and transient endpoints all affect results. Schedule repeated
+   scans from multiple authorized vantage points for inventory-grade coverage.
+
+“Reachable” means observable from this scanner with the selected methods at
+scan time. No active scan can prove that it found powered-off hosts, silent
+hosts behind filtering, layer-2-isolated VLANs, or networks absent from the
+routing table. Discovery unions ARP, fping, and nmap observations where
+applicable and service-scans already-live hosts with `-Pn`; it does not bypass
+segmentation.
 
 To keep history across runs, point the tool at a MariaDB and persist the run:
 
@@ -86,6 +117,9 @@ sudo -E uv run secman-intra-mon scan 10.20.30.40 --profile full --os-scan
 
 # Machine-readable output for scripting
 uv run secman-intra-mon discover --json | jq '.summary'
+
+# Deliberate secman feed: nothing is uploaded without this explicit flag
+sudo -E uv run secman-intra-mon discover --store-db --upload-secman
 
 # Persist, then browse history
 sudo -E uv run secman-intra-mon discover --store-db

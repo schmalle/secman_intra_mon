@@ -30,6 +30,11 @@ services:
   app:
     build: .
     network_mode: host
+    # arp-scan/masscan/nmap OS detection perform euid checks in addition to
+    # opening raw sockets. Limit root with a minimal capability set.
+    user: "0:0"
+    cap_drop:
+      - ALL
     cap_add:
       - NET_RAW
       - NET_ADMIN

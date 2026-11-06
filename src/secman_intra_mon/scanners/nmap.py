@@ -43,9 +43,15 @@ def service_scan(
     os_scan: bool = False,
     ports: str | None = None,
     timeout: int = SERVICE_SCAN_TIMEOUT,
+    skip_discovery: bool = True,
 ) -> tuple[list[DiscoveredHost], str]:
     """Service/version scan of live hosts. Returns (hosts, raw_xml)."""
     argv = ["nmap", "-sV", "--version-intensity", "4", "-n", "-T4"]
+    # The caller already proved these hosts live (ARP, ICMP or another open
+    # port).  -Pn prevents nmap from silently dropping hosts that block its
+    # separate discovery probes.
+    if skip_discovery:
+        argv.append("-Pn")
     if ports:
         argv += ["-p", ports]
     else:
