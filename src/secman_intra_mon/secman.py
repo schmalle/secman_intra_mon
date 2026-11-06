@@ -13,6 +13,7 @@ re-verify path / method / request fields / response fields / roles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -93,7 +94,13 @@ class SecmanClient:
 
     # -- ingestion -----------------------------------------------------------
 
-    def push_asset(self, host: DiscoveredHost, owner: str, enrichment: Enrichment | None = None) -> bool:
+    def push_asset(
+        self,
+        host: DiscoveredHost,
+        owner: str,
+        enrichment: Enrichment | None = None,
+        observed_at: datetime | None = None,
+    ) -> bool:
         """Idempotent upsert of one asset. Returns True when newly created."""
         description = f"Discovered by secman_intra_mon ({host.discovered_via or 'scan'})"
         if enrichment and enrichment.role:
@@ -107,6 +114,10 @@ class SecmanClient:
             "description": description,
             "tags": self._asset_tags(host, enrichment),
         }
+        if observed_at is not None:
+            if observed_at.tzinfo is None:
+                raise ValueError("Observation time must carry a timezone")
+            body["observedAt"] = observed_at.isoformat()
         response = self._request("PUT", IMPORT_ASSET_PATH, json=body)
         payload = response.json()
         return bool(payload.get("created", False))
@@ -165,13 +176,14 @@ def push_hosts(
     owner: str,
     xml_documents: list[str] | None = None,
     enrichments: dict[str, Enrichment] | None = None,
+    observed_at: datetime | None = None,
 ) -> PushSummary:
     """Push all discovered assets, then upload nmap XML. Never raises on
     individual asset failures — errors are collected into the summary."""
     summary = PushSummary()
     for host in hosts:
         try:
-            if client.push_asset(host, owner, (enrichments or {}).get(host.ip)):
+            if client.push_asset(host, owner, (enrichments or {}).get(host.ip), observed_at=observed_at):
                 summary.assets_created += 1
             else:
                 summary.assets_updated += 1

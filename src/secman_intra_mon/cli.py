@@ -7,6 +7,7 @@ import os
 import socket
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Annotated, Any, NoReturn
 
 import pymysql
@@ -244,6 +245,7 @@ def discover(
     )
     topology = get_topology()
     run = create_run(options, guard, topology)
+    observation_started_at = datetime.now(UTC)
 
     if dry_run:
         plan = build_plan(run)
@@ -337,7 +339,7 @@ def discover(
             success(f"run {run_id} persisted")
 
     if upload_secman:
-        _upload_run_to_secman(run.all_hosts, run.nmap_xml_documents, enrichments)
+        _upload_run_to_secman(run.all_hosts, run.nmap_xml_documents, enrichments, observation_started_at)
 
 
 def _make_approver(yes: bool, json_output: bool) -> Callable[[str], bool]:
@@ -396,12 +398,13 @@ def _upload_run_to_secman(
     hosts: list[DiscoveredHost],
     xml_documents: list[str],
     enrichments: dict[str, Enrichment] | None = None,
+    observed_at: datetime | None = None,
 ) -> None:
     client = _secman_client_or_fail()
     try:
         _login_and_check_roles(client)
         owner = _asset_owner(client.username)
-        summary = push_hosts(client, hosts, owner, xml_documents, enrichments)
+        summary = push_hosts(client, hosts, owner, xml_documents, enrichments, observed_at=observed_at)
         success(
             f"secman: {summary.assets_created} asset(s) created, "
             f"{summary.assets_updated} updated, {summary.xml_uploads} nmap XML upload(s)"

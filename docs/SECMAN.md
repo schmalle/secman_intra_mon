@@ -129,3 +129,7 @@ This is a coordinated backend change: the secman repo must ship the new source
 value before this client can send it, and the client's payload mapping
 (assets, ports, networks → integration-run DTOs) needs to be verified against
 that contract. Until then, Phase 1 remains the supported integration path.
+
+## Current inventory observations
+
+SecMan shows only assets observed within 72 hours. Live discovery uploads provide the UTC discovery start time as `observedAt` on the ADMIN asset-import request, including live hosts discovered by ARP or fping. Uploading stored metadata does not invent a fresh observation timestamp. Raw nmap XML supplies its actual scan timestamp through the existing scan-upload endpoint. Falcon-managed assets still require Falcon sensor contact, independently of network discovery. Path, method, cookie/Bearer authentication, ADMIN role and the `asset`/`created` response remain unchanged.
